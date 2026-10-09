@@ -1,22 +1,25 @@
 import { describe, expect, it } from 'vitest';
-import { MIN_CONFIDENCE, dynamicFloor, estimateCoupling } from './coupling';
+import { MIN_CONFIDENCE, MIN_DRIVE, MIN_LEAK_FRAMES, dynamicFloor, estimateCoupling, leakVerdict } from './coupling';
 import type { CouplingSample } from './coupling';
 
 const ROOM: [number, number, number] = [1e-8, 1e-8, 1e-8];
 const ROOM_RMS = 3e-8;
 
-/** The three levels the burst actually steps through. */
-const LEVELS = [1, 0.35, 0.12];
-
 /**
- * A burst of frames at stepped levels, with a known coupling.
+ * Frames of a TRACK PLAYING, with a known coupling.
+ *
+ * The level follows a music-like contour rather than a stepped burst, because
+ * that is what the estimator is now fed: there is no test signal any more, the
+ * track's own dynamics are the excitation.
  *
  * `extra` is sound the speaker did NOT cause — a breath, a voice, a door —
  * which is the thing the slope has to be immune to.
  */
 function burst(c: number, frames = 54, extra: (i: number) => number = () => 0): CouplingSample[] {
   return Array.from({ length: frames }, (_, i) => {
-    const level = LEVELS[Math.floor(i / 6) % LEVELS.length];
+    /* A slow swell with beats on top: roughly how a mix's level moves. */
+    const level =
+      0.45 + 0.4 * Math.sin(i / 9) + (i % 7 === 0 ? 0.15 : 0);
     const played = 1e-4 * level * level;
     const uncorrelated = extra(i);
     return {
@@ -33,17 +36,29 @@ function burst(c: number, frames = 54, extra: (i: number) => number = () => 0): 
 }
 
 describe('estimateCoupling', () => {
-  it('recovers a known coupling from a stepped burst', () => {
+  it("recovers a known coupling from the track's own dynamics", () => {
     const c = estimateCoupling(burst(0.02), ROOM_RMS);
     expect(c.band[0]).toBeCloseTo(0.02, 5);
     expect(c.rms).toBeCloseTo(0.02, 5);
     expect(c.confidence).toBeGreaterThan(0.99);
   });
 
-  /** Headphones: nothing comes back, so nothing must be subtracted later. */
-  it('reports zero coupling when the speaker never reaches the mic', () => {
+  /**
+   * Headphones: nothing comes back, so nothing must be subtracted later.
+   *
+   * A least-squares slope over smoothly varying playback does not land on
+   * exactly zero even with no acoustic path — it lands on about 1e-30, whose
+   * log is -300 dB. That has to be reported as "none" rather than as a
+   * number, which is what NEGLIGIBLE_LEAK_DB is for.
+   */
+  it('reports no leak at all when the speaker never reaches the mic', () => {
     const c = estimateCoupling(burst(0), ROOM_RMS);
     expect(c.band[0]).toBeCloseTo(0, 9);
+    expect(c.leakDb).toBe(Number.NEGATIVE_INFINITY);
+  });
+
+  it('calls a leak far below the room floor none, rather than a big negative', () => {
+    const c = estimateCoupling(burst(1e-9), ROOM_RMS);
     expect(c.leakDb).toBe(Number.NEGATIVE_INFINITY);
   });
 
@@ -80,6 +95,7 @@ describe('estimateCoupling', () => {
     expect(estimateCoupling(noisy, ROOM_RMS).confidence).toBeLessThan(MIN_CONFIDENCE);
   });
 
+  /** A drone with no dynamics gives the regression nothing to work with. */
   it('refuses to guess when the level never moved', () => {
     const flat: CouplingSample[] = Array.from({ length: 54 }, () => ({
       played: [1e-4, 1e-4, 1e-4] as const,
@@ -97,6 +113,30 @@ describe('estimateCoupling', () => {
        ADD energy when subtracted. */
     const inverted = burst(-0.02);
     expect(estimateCoupling(inverted, ROOM_RMS).band.every((v) => v >= 0)).toBe(true);
+  });
+
+  /**
+   * THE ONE WAY THIS CAN STILL BE FOOLED, documented rather than hidden.
+   *
+   * A breath is normally uncorrelated with the music and lands in the
+   * intercept. But in a guided breathing exercise people breathe IN TIME with
+   * the track, and a breath that rises and falls WITH the level biases the
+   * slope upward — which would over-subtract and disarm the detector.
+   *
+   * This is why the leak phase in useBreathDetector excludes frames where a
+   * breath looks to be in progress. This test exists so that the exclusion is
+   * never quietly removed as redundant.
+   */
+  it('IS biased by interference correlated with the level', () => {
+    const synced = burst(0.02, 54, (i) => {
+      const level = 0.45 + 0.4 * Math.sin(i / 9);
+      return 1e-4 * level * level * 0.05; // a breath in time with the music
+    });
+    const c = estimateCoupling(synced, ROOM_RMS);
+    /* Materially above the true 0.02 — the fit still looks excellent, which
+       is exactly what makes it dangerous. */
+    expect(c.band[0]).toBeGreaterThan(0.03);
+    expect(c.confidence).toBeGreaterThan(0.9);
   });
 
   it('declines to report anything from too few frames', () => {
@@ -139,5 +179,80 @@ describe('dynamicFloor', () => {
     const breathPower = ROOM_RMS * 1000;
     const heardRmsDb = 10 * Math.log10(ROOM_RMS + 0.02 * played * 3 + breathPower);
     expect(heardRmsDb - f.rmsDb).toBeGreaterThan(6);
+  });
+});
+
+describe('drive', () => {
+  /**
+   * The two facts that used to arrive as one. A poor fit on a drone can never
+   * improve, so the caller must not sit waiting for it; a poor fit on a track
+   * that IS moving might.
+   */
+  it('is near zero for a drone and substantial for a dynamic track', () => {
+    const drone: CouplingSample[] = Array.from({ length: 54 }, () => ({
+      played: [1e-4, 1e-4, 1e-4] as const,
+      heard: [2e-6, 2e-6, 2e-6] as const,
+      playedRms: 3e-4,
+      heardRms: 6e-6,
+    }));
+    expect(estimateCoupling(drone, ROOM_RMS).drive).toBeLessThan(MIN_DRIVE);
+    expect(estimateCoupling(burst(0.02), ROOM_RMS).drive).toBeGreaterThan(MIN_DRIVE);
+  });
+});
+
+describe('leakVerdict', () => {
+  /**
+   * THE HEADPHONE CASE, and the one this classification was added for.
+   *
+   * With headphones the speaker genuinely does not reach the microphone, so
+   * the slope is ~0 and r-squared is meaningless — there is no relationship to
+   * fit. Reading that as a failed measurement made the configuration the whole
+   * exercise is for wait nine seconds for a fit that could never succeed and
+   * then apologise. It is the GOOD outcome and must classify as one.
+   */
+  it('calls a negligible slope none, whatever the fit says', () => {
+    const c = estimateCoupling(burst(0), ROOM_RMS);
+    expect(c.confidence).toBeLessThan(MIN_CONFIDENCE);
+    expect(leakVerdict(c)).toBe('none');
+  });
+
+  it('calls a well-fitted real leak measured', () => {
+    expect(leakVerdict(estimateCoupling(burst(0.02), ROOM_RMS))).toBe('measured');
+  });
+
+  it('calls a drone unmeasurable rather than leak-free', () => {
+    const drone: CouplingSample[] = Array.from({ length: 54 }, () => ({
+      played: [1e-4, 1e-4, 1e-4] as const,
+      heard: [2e-6, 2e-6, 2e-6] as const,
+      playedRms: 3e-4, heardRms: 6e-6,
+    }));
+    expect(leakVerdict(estimateCoupling(drone, ROOM_RMS))).toBe('unmeasurable');
+  });
+
+  it('calls a real leak with a bad fit untrusted', () => {
+    const noisy = burst(0.02, 54, (i) => ROOM[0] * 400 * (1 + Math.sin(i * 2.7)));
+    expect(leakVerdict(estimateCoupling(noisy, ROOM_RMS))).toBe('untrusted');
+  });
+
+  it('treats a missing measurement as unmeasurable, never as leak-free', () => {
+    expect(leakVerdict(null)).toBe('unmeasurable');
+  });
+});
+
+describe('MIN_LEAK_FRAMES', () => {
+  /**
+   * The caller discards every frame with a breath in it, so somebody
+   * breathing steadily can leave only a handful behind. Eight frames is enough
+   * to COMPUTE a slope and nowhere near enough to trust one, which is why the
+   * caller waits for more rather than concluding from nine.
+   */
+  it('is well above the hard floor needed to compute a slope at all', () => {
+    expect(MIN_LEAK_FRAMES).toBeGreaterThan(8);
+  });
+
+  it('still produces a usable verdict once there are enough frames', () => {
+    const c = estimateCoupling(burst(0.02, MIN_LEAK_FRAMES), ROOM_RMS);
+    expect(c.framesUsed).toBe(MIN_LEAK_FRAMES);
+    expect(leakVerdict(c)).toBe('measured');
   });
 });

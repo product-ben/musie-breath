@@ -13,23 +13,18 @@ import { FFT_SIZE, SMOOTHING_TIME_CONSTANT } from '../detect/config';
  * gain instead would make every coefficient wrong the moment anybody touched
  * the volume slider.
  *
- * Pink noise for the coupling burst goes through the SAME gain and the SAME
- * analyser, so the burst is measured on exactly the path the music will take.
+ * There is deliberately NO test signal here any more. Coupling used to be
+ * measured with a level-stepped pink-noise burst, which worked and sounded
+ * like a stuttering "krrr krrr" before a calm breathing exercise. The
+ * regression that estimates coupling only needs the playback level to VARY,
+ * and music varies more than any burst does — so the track is its own
+ * excitation and the measurement is silent. See detect/coupling.ts.
  */
 
 export type Playback = {
   /** Tapped post-volume. Its band powers are what coupling multiplies. */
   readonly analyser: AnalyserNode;
   readonly setVolume: (v: number) => void;
-  /** Pink noise through the same path, for the coupling measurement. */
-  readonly startPink: () => void;
-  /**
-   * The burst's own level, stepped during the measurement so the regression
-   * in detect/coupling.ts has a slope to fit. Separate from the user's volume
-   * so stepping it does not move the slider under them.
-   */
-  readonly setPinkLevel: (level: number) => void;
-  readonly stopPink: () => void;
   readonly playTrack: () => Promise<void>;
   readonly pauseTrack: () => void;
   readonly loadFile: (file: File) => void;
@@ -39,39 +34,17 @@ export type Playback = {
 };
 
 /**
- * Pink noise, Paul Kellett's filter on white noise.
- *
- * Pink rather than white because the coupling estimate wants roughly equal
- * energy per octave: white noise puts most of its power in the top octave,
- * where a phone speaker is least able to reproduce it, so the low-band
- * coefficient would be measured from almost nothing.
- */
-function pinkBuffer(context: AudioContext, seconds: number): AudioBuffer {
-  const n = Math.floor(context.sampleRate * seconds);
-  const buffer = context.createBuffer(1, n, context.sampleRate);
-  const out = buffer.getChannelData(0);
-  let b0 = 0, b1 = 0, b2 = 0, b3 = 0, b4 = 0, b5 = 0, b6 = 0;
-  for (let i = 0; i < n; i += 1) {
-    const w = Math.random() * 2 - 1;
-    b0 = 0.99886 * b0 + w * 0.0555179;
-    b1 = 0.99332 * b1 + w * 0.0750759;
-    b2 = 0.96900 * b2 + w * 0.1538520;
-    b3 = 0.86650 * b3 + w * 0.3104856;
-    b4 = 0.55000 * b4 + w * 0.5329522;
-    b5 = -0.7616 * b5 - w * 0.0168980;
-    out[i] = (b0 + b1 + b2 + b3 + b4 + b5 + b6 + w * 0.5362) * 0.11;
-    b6 = w * 0.115926;
-  }
-  return buffer;
-}
-
-/**
  * A slow ambient pad, so the spike runs with no asset at all.
  *
  * Deliberately NOT music: a few detuned partials with slow amplitude drift.
  * It is here so the track path can be exercised before anybody has found an
  * mp3, and it is the wrong signal for judging whether this works on real
  * music — a real mix is far denser and leaks far more.
+ *
+ * It SWELLS, and that is functional rather than decorative. The leak estimate
+ * is a regression against the playback level, so a track whose level never
+ * moves cannot be measured at all. A flat drone here would make the very
+ * first thing anybody tries report an unmeasurable leak.
  */
 function padBuffer(context: AudioContext, seconds: number): AudioBuffer {
   const sr = context.sampleRate;
@@ -88,7 +61,9 @@ function padBuffer(context: AudioContext, seconds: number): AudioBuffer {
     });
     /* A long fade at both ends so the loop point is inaudible. */
     const fade = Math.min(1, t / 2, (seconds - t) / 2);
-    out[i] = v * 0.16 * Math.max(0, fade);
+    /* Two slow swells over the loop, deep enough to fit a slope against. */
+    const swell = 0.35 + 0.65 * (0.5 - 0.5 * Math.cos(2 * Math.PI * t / (seconds / 2)));
+    out[i] = v * 0.22 * swell * Math.max(0, fade);
   }
   return buffer;
 }
@@ -111,13 +86,7 @@ export function createPlayback(context: AudioContext): Playback {
   const elementSource = context.createMediaElementSource(element);
   elementSource.connect(volume);
 
-  const pinkGain = context.createGain();
-  pinkGain.gain.value = 1;
-  pinkGain.connect(volume);
-
-  let pink: AudioBufferSourceNode | null = null;
   let pad: AudioBufferSourceNode | null = null;
-  let pinkCache: AudioBuffer | null = null;
   let padCache: AudioBuffer | null = null;
   let source: 'none' | 'file' | 'pad' = 'none';
   let name = '';
@@ -137,29 +106,6 @@ export function createPlayback(context: AudioContext): Playback {
       /* setTargetAtTime rather than a jump: a step change in gain is an audible
          click, and a click is a broadband transient straight into the mic. */
       volume.gain.setTargetAtTime(Math.max(0, Math.min(1, v)), context.currentTime, 0.02);
-    },
-
-    startPink: () => {
-      if (pinkCache === null) pinkCache = pinkBuffer(context, 2);
-      pink = context.createBufferSource();
-      pink.buffer = pinkCache;
-      pink.loop = true;
-      pinkGain.gain.value = 1;
-      pink.connect(pinkGain);
-      pink.start();
-    },
-
-    setPinkLevel: (level) => {
-      pinkGain.gain.setTargetAtTime(
-        Math.max(0, Math.min(1, level)), context.currentTime, 0.01,
-      );
-    },
-
-    stopPink: () => {
-      if (pink === null) return;
-      try { pink.stop(); } catch { /* already stopped */ }
-      pink.disconnect();
-      pink = null;
     },
 
     playTrack: async () => {
@@ -214,9 +160,7 @@ export function createPlayback(context: AudioContext): Playback {
       element.pause();
       element.removeAttribute('src');
       stopPad();
-      if (pink !== null) { try { pink.stop(); } catch { /* ignore */ } pink.disconnect(); pink = null; }
       elementSource.disconnect();
-      pinkGain.disconnect();
       volume.disconnect();
       analyser.disconnect();
       if (objectUrl !== null) { URL.revokeObjectURL(objectUrl); objectUrl = null; }

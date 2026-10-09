@@ -27,7 +27,7 @@ const SLIDERS: readonly {
 export function App() {
   const {
     status, live, floor, coupling, diagnostics, config, setConfig,
-    devices, wantedDeviceId, setWantedDeviceId, route,
+    devices, wantedDeviceId, setWantedDeviceId, route, leak,
     processing, setProcessing, begin, reopen, started,
     volume, setVolume, lagMs, setLagMs,
     trackState, loadFile, useGeneratedPad, toggleTrack,
@@ -203,8 +203,10 @@ route says  ${route === null ? '—' : `${route.likely}${route.narrowband ? ', n
             <p className="breath-note">
               Played through the microphone's own audio context, so there is one
               iOS audio session rather than two competing over routing. The
-              spectrum is tapped after the volume, which is what makes the
-              measured leak independent of how loud you set it.
+              spectrum is tapped after the volume, which keeps the measured leak
+              independent of how loud you set it. The first few seconds of the
+              track double as the leak measurement — its own dynamics are the
+              test signal, so nothing extra is ever played at you.
             </p>
             <div className="breath-buttons">
               <label className="breath-button">
@@ -247,31 +249,54 @@ route says  ${route === null ? '—' : `${route.likely}${route.narrowband ? ', n
             {/* The measurement this whole section exists for. */}
             <pre className="breath-pre" style={{ marginTop: 10 }}>
 {`speaker leak  ${coupling === null ? '— not measured' : Number.isFinite(coupling.leakDb) ? `${coupling.leakDb.toFixed(1)} dB over the room floor` : 'none detected'}
+verdict       ${coupling === null ? '—' : leak}
 coupling      ${coupling === null ? '—' : coupling.band.map((v) => v.toExponential(1)).join('  ')}
-fit           ${coupling === null ? '—' : `r² ${coupling.confidence.toFixed(3)}${coupling.confidence < MIN_CONFIDENCE ? '  NOT TRUSTED' : ''}`}
+fit           ${coupling === null ? '—' : leak === 'none' ? 'n/a — nothing to fit' : `r² ${coupling.confidence.toFixed(3)}${coupling.confidence < MIN_CONFIDENCE ? '  NOT TRUSTED' : ''}`}
+track drive   ${coupling === null ? '—' : coupling.drive.toFixed(3)}
 frames used   ${coupling?.framesUsed ?? '—'}`}
             </pre>
-            {coupling !== null && coupling.confidence < MIN_CONFIDENCE && (
-              <p className="breath-warn">
-                The leak measurement did not fit (r² {coupling.confidence.toFixed(2)}),
-                so something the speaker was not causing happened during the
-                burst. These coefficients are being ignored rather than trusted —
-                the floor stays static. Keep still and quiet and recalibrate.
-              </p>
-            )}
-            {coupling !== null && coupling.confidence >= MIN_CONFIDENCE && Number.isFinite(coupling.leakDb) && coupling.leakDb >= LEAK_WARN_DB && (
-              <p className="breath-warn">
-                The track is reaching the microphone {coupling.leakDb.toFixed(0)} dB above the
-                room. Subtraction is being asked to remove more than a breath is
-                worth, so a missed or a phantom breath is likely. Headphones, or
-                less volume.
-              </p>
-            )}
-            {coupling !== null && coupling.confidence >= MIN_CONFIDENCE && !Number.isFinite(coupling.leakDb) && (
+            {coupling !== null && leak === 'none' && (
               <p className="breath-note">
-                No measurable leak — headphones, or a speaker the microphone
-                cannot hear. This is the easy case: the floor stays static and
-                the detector behaves exactly as it does in silence.
+                <strong>No measurable leak.</strong> The speaker is not reaching
+                the microphone, which is what headphones are supposed to do.
+                The floor stays static and the detector behaves exactly as it
+                does in silence — the easy case, and the one worth having.
+              </p>
+            )}
+
+            {coupling !== null && leak === 'measured' && coupling.leakDb < LEAK_WARN_DB && (
+              <p className="breath-note">
+                A real leak, fitted well, and small enough to subtract. The
+                floor now rises and falls with the track.
+              </p>
+            )}
+
+            {coupling !== null && leak === 'measured' && coupling.leakDb >= LEAK_WARN_DB && (
+              <p className="breath-warn">
+                The track is reaching the microphone {coupling.leakDb.toFixed(0)} dB
+                above the room. Subtraction is being asked to remove more than a
+                breath is worth, so a missed or a phantom breath is likely.
+                Headphones, or less volume.
+              </p>
+            )}
+
+            {coupling !== null && leak === 'unmeasurable' && (
+              <p className="breath-warn">
+                This track's level barely moves (drive {coupling.drive.toFixed(3)}).
+                The leak is measured as a slope against that level, so a drone
+                offers nothing to measure against. Not a problem if you are on
+                headphones — there is likely nothing to subtract anyway — but on
+                a speaker it means the leak is unknown rather than absent.
+              </p>
+            )}
+
+            {coupling !== null && leak === 'untrusted' && (
+              <p className="breath-warn">
+                A real leak appeared but the fit is poor (r² {coupling.confidence.toFixed(2)}),
+                so something the speaker was not causing was happening
+                throughout. The coefficients are being ignored rather than
+                trusted — the floor stays static. Let the track play a few
+                seconds without breathing at it, then recalibrate.
               </p>
             )}
           </div>

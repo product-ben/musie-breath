@@ -12,10 +12,11 @@ import {
   CALIBRATION_MEASURE_MS,
   DEFAULT_CONFIG,
   FFT_SIZE,
-  LEAK_MEASURE_MS,
+  LEAK_MAX_MS,
+  LEAK_MIN_MS,
 } from './detect/config';
 import type { DetectorConfig } from './detect/config';
-import { LEAK_FATAL_DB, MIN_CONFIDENCE, dynamicFloor, estimateCoupling } from './detect/coupling';
+import { LEAK_FATAL_DB, MIN_LEAK_FRAMES, dynamicFloor, estimateCoupling, leakVerdict } from './detect/coupling';
 import type { Coupling, CouplingSample } from './detect/coupling';
 import { initialDetectorState, stepDetector } from './detect/decide';
 import type { DetectorState } from './detect/decide';
@@ -36,7 +37,7 @@ import type { CaptureStatus, DetectionVerdict } from './detect/status';
  *
  * ── THREE PHASES, IN THIS ORDER, EACH NEEDING THE ONE BEFORE ───────────────
  *   1. room floor    — silence. Also the proof the graph renders at all.
- *   2. speaker leak  — pink noise. Needs the room floor to subtract from.
+ *   2. speaker leak  — the track's first seconds. Needs the room floor first.
  *   3. listening     — the track plays; the floor becomes room + predicted leak.
  */
 
@@ -153,7 +154,7 @@ export function useBreathDetector() {
       const roomSamples: CalibrationSample[] = [];
       const leakSamples: CouplingSample[] = [];
       const framesNeeded = Math.round((CALIBRATION_MEASURE_MS / 1000) * 60);
-      const leakFramesNeeded = Math.round((LEAK_MEASURE_MS / 1000) * 60);
+      const leakFramesNeeded = Math.round((LEAK_MIN_MS / 1000) * 60);
       setStatus({ kind: 'calibrating', framesDone: 0, framesNeeded });
 
       type Phase = 'room' | 'leak' | 'listening';
@@ -250,54 +251,92 @@ export function useBreathDetector() {
 
           phase = 'leak';
           phaseStart = now;
-          pb.startPink();
+          detector = initialDetectorState(now);
+          /* The track starts HERE, and is its own test signal from now on. */
+          void pb.playTrack().then(() => { if (!aborted) setTrackState(pb.state()); });
           setStatus({ kind: 'measuringLeak', framesDone: 0, framesNeeded: leakFramesNeeded });
           return;
         }
 
-        /* ── Phase 2: what the speaker puts back into the mic ──────────── */
+        /* ── Phase 2: learn the leak from the track's own dynamics ─────── */
         if (phase === 'leak') {
           const elapsed = now - phaseStart;
           const floorNow = measuredFloor;
           if (floorNow === null) return;
-          /**
-           * THE LEVEL HAS TO MOVE, or there is no slope to fit.
-           *
-           * Stepped rather than swept, in ~180 ms blocks, so each level holds
-           * long enough for several 42.7 ms analysis windows to sit entirely
-           * inside it rather than straddling a change.
-           */
-          const step = Math.floor(elapsed / 180) % 3;
-          pb?.setPinkLevel(step === 0 ? 1 : step === 1 ? 0.35 : 0.12);
 
-          /* Discard the first frames: the gain ramp and the buffer fill. */
-          if (elapsed >= 200) {
+          /**
+           * The detector runs during this window on the STATIC room floor,
+           * for one reason: to know when not to look.
+           *
+           * A breath is uncorrelated with the music, so it lands in the
+           * regression's intercept and leaves the slope alone — that is the
+           * whole point of fitting a slope. But in a guided breathing exercise
+           * people breathe IN TIME with the track, and a breath that is
+           * correlated with the level would bias the very thing being
+           * measured. So frames where a breath looks to be in progress are
+           * left out of the fit entirely.
+           */
+          const roomRmsPower = Math.pow(10, floorNow.rmsDb / 10);
+          const provisional = extractFeatures({
+            timeDomain: micTime, binsDb: micDb, floor: floorNow, bins,
+            at: now, dt, shapeValidExcessDb: configRef.current.shapeValidExcessDb,
+          });
+          detector = stepDetector(detector, provisional, configRef.current);
+          live.current.frame = provisional;
+          live.current.detector = detector;
+
+          /* 200 ms of grace for the gain ramp and the element's first buffer. */
+          if (elapsed >= 200 && !detector.breathing && detector.phase !== 'onset') {
             leakSamples.push({
               played: playedBand,
               heard: bandPowers(micDb, bins),
               playedRms,
               heardRms: rmsOf(micTime) ** 2,
             });
-            setStatus({ kind: 'measuringLeak', framesDone: leakSamples.length, framesNeeded: leakFramesNeeded });
+            setStatus({
+              kind: 'measuringLeak',
+              framesDone: leakSamples.length,
+              framesNeeded: leakFramesNeeded,
+            });
           }
-          if (elapsed < 200 + LEAK_MEASURE_MS) return;
 
-          pb?.stopPink();
-          const roomRmsPower = Math.pow(10, floorNow.rmsDb / 10);
+          if (elapsed < LEAK_MIN_MS) return;
+
           const c = estimateCoupling(leakSamples, roomRmsPower);
-          measuredCoupling = c;
-          setCoupling(c);
 
           /**
-           * A fit this poor means something uncorrelated was happening during
-           * the burst, so these coefficients are not evidence and subtracting
-           * with them would disarm the detector for the whole session. Better
-           * to carry on with the static room floor and SAY SO than to trust a
-           * number that was never measured.
+           * Wait longer ONLY for the one verdict that waiting can change.
+           *
+           * `untrusted` means the level moved, a real slope appeared, and the
+           * fit is still poor — so interference is in the way and more frames
+           * might clear it. Every other verdict is final: a drone will not
+           * start swelling, and a speaker that is not reaching the microphone
+           * will not start. Waiting on those made the headphone case — the
+           * whole point of the exercise — sit silent for nine seconds and then
+           * apologise.
            */
-          if (c.confidence < MIN_CONFIDENCE) measuredCoupling = null;
+          const verdict = leakVerdict(c);
 
-          if (c.leakDb >= LEAK_FATAL_DB) {
+          /**
+           * Two reasons to keep watching, and both are reasons where waiting
+           * genuinely changes the answer:
+           *
+           *  - too few USABLE frames. Every frame with a breath in it was
+           *    thrown away, so somebody breathing steadily through the window
+           *    leaves almost nothing behind. Time fixes that.
+           *  - `untrusted`: a real slope, a poor fit, so interference is in
+           *    the way and it may pass.
+           *
+           * Every other verdict is final and waiting on it is just silence.
+           */
+          const tooFewFrames = leakSamples.length < MIN_LEAK_FRAMES;
+          if ((tooFewFrames || verdict === 'untrusted') && elapsed < LEAK_MAX_MS) return;
+
+          /* Only a well-fitted, real leak is ever subtracted. */
+          measuredCoupling = verdict === 'measured' ? c : null;
+          setCoupling(c);
+
+          if (verdict === 'measured' && c.leakDb >= LEAK_FATAL_DB) {
             setStatus({ kind: 'failed', code: 'trackDrowningMic' });
             cancelAnimationFrame(raf);
             return;
@@ -309,7 +348,6 @@ export function useBreathDetector() {
           detector = initialDetectorState(now);
           setStatus({ kind: 'listening' });
           setDiagnostics(mic.diagnostics());
-          void pb?.playTrack().then(() => { if (!aborted && pb !== null) setTrackState(pb.state()); });
           return;
         }
 
@@ -434,10 +472,11 @@ export function useBreathDetector() {
   const restart = useCallback(() => setGeneration((g) => g + 1), []);
 
   const route = diagnostics === null ? null : routeFromRate(diagnostics.sampleRate);
+  const leak = leakVerdict(coupling);
 
   return {
     status, live, floor, coupling, diagnostics,
-    devices, wantedDeviceId, setWantedDeviceId, route,
+    devices, wantedDeviceId, setWantedDeviceId, route, leak,
     config, setConfig, processing, setProcessing,
     volume, setVolume, lagMs, setLagMs,
     trackState, loadFile, useGeneratedPad, toggleTrack,

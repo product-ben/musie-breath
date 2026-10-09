@@ -46,7 +46,10 @@ export type CaptureStatus =
   | { readonly kind: 'opening' }
   | { readonly kind: 'reopening' }
   | { readonly kind: 'calibrating'; readonly framesDone: number; readonly framesNeeded: number }
-  /** The pink-noise burst that measures speaker-to-microphone coupling. */
+  /**
+   * The opening seconds of the track, which double as the measurement of how
+   * much of it reaches the microphone. Nothing extra is played to do this.
+   */
   | { readonly kind: 'measuringLeak'; readonly framesDone: number; readonly framesNeeded: number }
   | { readonly kind: 'listening' }
   | { readonly kind: 'failed'; readonly code: CaptureFailure; readonly detail?: string };

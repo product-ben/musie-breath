@@ -141,16 +141,21 @@ export const CALIBRATION_MEASURE_MS = 1200;
 export const SILENT_GRAPH_MS = 1500;
 
 /**
- * How long the pink-noise burst runs to measure speaker-to-microphone
- * coupling.
+ * How long to watch the track before fitting the coupling slope.
  *
- * DERIVED, loosely: ~60 frames at 60 Hz, which is enough for a median to be
- * robust against one transient, and short enough that a burst of noise in the
- * middle of a calm screen is a moment rather than an event. Shorter than the
- * room window because pink noise is stationary by construction, so there is
- * less variance to average away.
+ * There used to be a level-stepped pink-noise burst here. It worked, and it
+ * sounded like a stuttering "krrr krrr" immediately before a calm breathing
+ * exercise, which is the wrong first impression for this of all products. The
+ * regression only needs the playback level to VARY, and music varies far more
+ * than a burst does, so the track is now its own excitation.
+ *
+ * Three seconds is the minimum because a fit wants a decent spread of levels
+ * and most music supplies that within a bar or two. If the fit is still poor —
+ * a sustained drone with no dynamics, say — it keeps watching up to the
+ * maximum before giving up and keeping the static floor.
  */
-export const LEAK_MEASURE_MS = 1000;
+export const LEAK_MIN_MS = 3000;
+export const LEAK_MAX_MS = 9000;
 
 /**
  * GUESS, from sound arithmetic. A close exhale with AGC off peaks somewhere

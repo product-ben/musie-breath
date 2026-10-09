@@ -14,38 +14,42 @@
  * exactly the variable this spike exists to measure. So instead: the playback
  * signal is OURS, we can analyse it, and we can subtract what it predicts.
  *
- * ── CALIBRATED WITH PINK NOISE, NOT WITH THE TRACK ─────────────────────────
- * Coupling is measured by playing a short pink-noise burst, because it excites
- * every band evenly. Measuring it from the music instead would divide by
- * near-zero in whichever bands the track happens to be quiet in at that
- * moment, and produce a wild coefficient that then over-subtracts for the rest
- * of the session.
+ * ── MEASURED FROM THE TRACK ITSELF, AS A SLOPE ─────────────────────────────
+ * Two versions came before this one and both were wrong, in instructive ways.
  *
- * ── AND MEASURED AS A SLOPE, NOT A RATIO. FOUND BY TESTING, 2026-10-09 ─────
- * The first version computed c = (heard - room) / played per frame and took
- * the median. Driven in a headless browser — where there is NO acoustic path
- * whatsoever, because the fake microphone reads a file — it confidently
- * reported 32 dB of speaker leak, because the burst happened to overlap a loud
- * passage in the fake microphone's file and the estimator had no way to tell
- * "the speaker did this" from "something else did this at the same time".
+ * The first computed c = (heard - room) / played per frame and took the median.
+ * Driven in a headless browser — where there is NO acoustic path at all,
+ * because the fake microphone reads a file — it confidently reported 32 dB of
+ * speaker leak, because the measurement happened to overlap a loud passage in
+ * that file. The estimator could not tell "the speaker caused this" from
+ * "something else happened at the same time". On a phone that is the failure
+ * mode rather than a curiosity: anybody who breathes or speaks during the
+ * measurement inflates the coefficient, and the detector then over-subtracts
+ * for the whole session and silently disarms itself. A median survives ONE
+ * transient; it does not survive a sustained one.
  *
- * On a phone that is not a curiosity, it is the failure mode: anybody who
- * breathes, speaks or closes a door during the one-second burst inflates the
- * coefficient, and the detector then over-subtracts for the entire session and
- * silently disarms itself. A median survives ONE transient; it does not
- * survive a sustained one.
- *
- * So the pink level is MODULATED during the burst and coupling is the
- * least-squares SLOPE of heard against played:
+ * So coupling is the least-squares SLOPE of heard against played:
  *
  *     heard_b = intercept_b + c_b * played_b
  *
- * Anything not correlated with the speaker — the room, a breath, a voice —
- * lands in `intercept_b` and leaves the slope alone. That is the whole point:
- * it measures what the speaker CAUSES rather than what merely coincides
- * with it. `confidence` reports how well the line actually fit, so a
- * measurement taken through a sound nobody controlled is visible rather than
- * trusted.
+ * Anything the speaker did not cause is constant across the window, lands in
+ * `intercept_b`, and leaves the slope alone. It measures what the speaker
+ * CAUSES rather than what merely COINCIDES with it. The room floor stops being
+ * a parameter for the same reason.
+ *
+ * The second version fed that regression a level-stepped pink-noise burst,
+ * because a slope needs the input to vary and pink noise is stationary. It
+ * worked, and it sounded like a stuttering "krrr krrr" immediately before a
+ * calm breathing exercise. Music is not stationary — it varies far more than
+ * any burst — so the track is now its own excitation and the measurement is
+ * silent.
+ *
+ * ── THE ONE WAY THIS CAN STILL BE FOOLED ───────────────────────────────────
+ * A breath is uncorrelated with the music, so it lands in the intercept. But
+ * in a guided breathing exercise people breathe IN TIME with the track, and a
+ * breath correlated with the level would bias the slope. The caller therefore
+ * excludes frames where a breath looks to be in progress — see the leak phase
+ * in useBreathDetector. The test below documents what happens if it does not.
  *
  * Everything here is linear POWER, never dB, because power is what adds.
  */
@@ -80,10 +84,81 @@ export type Coupling = {
    * something uncorrelated was happening and these numbers are not evidence.
    */
   readonly confidence: number;
+  /**
+   * How much the playback level actually moved, as a coefficient of variation.
+   *
+   * A slope needs its input to vary, and this says whether it did. It
+   * separates two facts that would otherwise both arrive as a poor fit:
+   *
+   *   low drive  — this track is a drone. No amount of extra waiting will
+   *                help, so do not wait.
+   *   good drive — the level moved and the fit still failed, so something
+   *                uncorrelated is interfering. More frames might help.
+   */
+  readonly drive: number;
 };
 
-/** Below this, the fit is not trustworthy and subtraction should be skipped. */
+/** Below this the playback level is effectively constant and unmeasurable. */
+export const MIN_DRIVE = 0.05;
+
+/**
+ * Usable frames wanted before any verdict is believed.
+ *
+ * Half a second of data. The hard floor inside estimateCoupling is 8 frames,
+ * which is enough to compute a slope and nowhere near enough to trust one —
+ * and the gap matters because the caller throws away every frame where a
+ * breath looks to be in progress. Somebody breathing steadily through the
+ * window can leave only a handful behind, and a slope fitted to nine frames
+ * is not a measurement. More time genuinely helps here, so the caller waits.
+ */
+export const MIN_LEAK_FRAMES = 30;
+
+/**
+ * What the leak measurement concluded — FOUR outcomes, not two.
+ *
+ * Collapsing these was a mistake made twice. A poor fit is not one fact:
+ *
+ *   none          the slope implies a leak far below the room floor. The
+ *                 speaker is not reaching the microphone. THIS IS THE
+ *                 HEADPHONE CASE AND IT IS THE GOOD ONE — r-squared is
+ *                 meaningless here, because there is no relationship to fit,
+ *                 and waiting longer cannot change that.
+ *   measured      a real leak, fitted well. Subtract it.
+ *   unmeasurable  the track is a drone. Nothing to regress against, ever.
+ *   untrusted     the level moved AND a real slope appeared AND the fit is
+ *                 poor, so something uncorrelated is interfering. The only
+ *                 case where more frames might genuinely help.
+ *
+ * Treating `none` as a failure made the configuration this spike is actually
+ * for — headphones out, phone microphone in — wait nine seconds for a fit that
+ * could never succeed, and then apologise for it.
+ */
+export type LeakVerdict = 'none' | 'measured' | 'unmeasurable' | 'untrusted';
+
+export function leakVerdict(c: Coupling | null): LeakVerdict {
+  if (c === null || c.framesUsed < 8) return 'unmeasurable';
+  if (c.drive < MIN_DRIVE) return 'unmeasurable';
+  /* Checked BEFORE confidence: a negligible slope is an answer, not a failure. */
+  if (!Number.isFinite(c.leakDb)) return 'none';
+  if (c.confidence < MIN_CONFIDENCE) return 'untrusted';
+  return 'measured';
+}
+
+/** Below this, the fit is not trustworthy and subtraction must be skipped. */
 export const MIN_CONFIDENCE = 0.5;
+
+/**
+ * A leak this far BELOW the room floor is no leak at all.
+ *
+ * Adding a power 1% of the room floor moves that floor by 0.04 dB, which is
+ * nothing. The threshold exists because a least-squares slope over real,
+ * smoothly varying playback does not come out as exactly zero even when there
+ * is genuinely no acoustic path — it comes out as 1e-30, and 10*log10 of that
+ * is -300 dB. Reporting "-300.1 dB of speaker leak" to somebody wearing
+ * headphones is worse than reporting nothing, because it looks like a
+ * measurement.
+ */
+export const NEGLIGIBLE_LEAK_DB = -20;
 
 /** Guard against a band the speaker never reached. */
 const MIN_PLAYED_POWER = 1e-12;
@@ -113,7 +188,7 @@ export function estimateCoupling(
   if (samples.length < 8) {
     return {
       band: [0, 0, 0], rms: 0, leakDb: Number.NEGATIVE_INFINITY,
-      framesUsed: samples.length, confidence: 0,
+      framesUsed: samples.length, confidence: 0, drive: 0,
     };
   }
 
@@ -159,10 +234,19 @@ export function estimateCoupling(
      the subtraction will be asked to handle. */
   const loudest = samples.reduce((a, s) => Math.max(a, s.playedRms), 0);
   const predicted = rmsFit.slope * loudest;
-  const leakDb =
+  const rawLeakDb =
     predicted <= 0 || roomRms <= 0
       ? Number.NEGATIVE_INFINITY
       : 10 * Math.log10(predicted / roomRms);
+  /* Below negligible, say so with -Infinity rather than with a number. */
+  const leakDb = rawLeakDb < NEGLIGIBLE_LEAK_DB ? Number.NEGATIVE_INFINITY : rawLeakDb;
+
+  /* Coefficient of variation of what was played: did the level move at all? */
+  const played = samples.map((s) => s.playedRms);
+  const meanPlayed = played.reduce((a, v) => a + v, 0) / played.length;
+  const varPlayed =
+    played.reduce((a, v) => a + (v - meanPlayed) ** 2, 0) / played.length;
+  const drive = meanPlayed <= 0 ? 0 : Math.sqrt(varPlayed) / meanPlayed;
 
   return {
     band: perBand,
@@ -170,6 +254,7 @@ export function estimateCoupling(
     leakDb,
     framesUsed: samples.length,
     confidence: Math.max(0, Math.min(1, worstR2)),
+    drive,
   };
 }
 

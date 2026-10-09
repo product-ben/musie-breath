@@ -191,9 +191,8 @@ So instead: **the playback signal is ours, so we can subtract what it
 predicts.** Calibration has three phases:
 
 1. **The room**, in silence. Also the proof the audio graph renders at all.
-2. **The speaker leak** — a one-second pink-noise burst. Pink rather than white
-   because the estimate wants roughly equal energy per octave; white noise puts
-   its power where a phone speaker is weakest.
+2. **The speaker leak** — the track's own first seconds. Its dynamics are the
+   excitation, so no test signal is ever played at you.
 3. **Listening**, with the floor now `room + coupling × live track spectrum`,
    delayed by the output latency because the microphone hears the past.
 
@@ -205,36 +204,78 @@ already works.
 
 ### The leak is measured as a slope, not a ratio
 
-This is the second defect testing found, and it mattered more than the first.
+Two versions came before this one, and both were wrong in instructive ways.
 
-The initial version computed `c = (heard − room) / played` per frame and took
-the median. Driven in a headless browser — where there is **no acoustic path
-whatsoever**, since the fake microphone reads a file — it confidently reported
-**32 dB of speaker leak**, because the burst happened to overlap a loud passage
-in that file. The estimator had no way to tell *the speaker caused this* from
-*something else happened at the same time*.
+The first computed `c = (heard − room) / played` per frame and took the median.
+Driven in a headless browser — where there is **no acoustic path whatsoever**,
+since the fake microphone reads a file — it confidently reported **32 dB of
+speaker leak**, because the measurement overlapped a loud passage in that file.
+The estimator had no way to tell *the speaker caused this* from *something else
+happened at the same time*.
 
 On a phone that is the failure mode, not a curiosity: anyone who breathes,
-speaks or shuts a door during the burst inflates the coefficient, and the
+speaks or shuts a door during the measurement inflates the coefficient, and the
 detector then over-subtracts for the rest of the session and silently disarms
 itself. A median survives one transient; it does not survive a sustained one.
 
-So the burst **steps its level** and coupling is the least-squares slope of
-heard against played:
+So coupling is the least-squares **slope** of heard against played:
 
 ```
 heard_b = intercept_b + c_b · played_b
 ```
 
-Anything the speaker did not cause is constant across the burst, lands in
+Anything the speaker did not cause is constant across the window, lands in
 `intercept_b`, and leaves the slope alone. It measures what the speaker
 *causes* rather than what merely *coincides* with it. The room floor stops
-being a parameter at all, for the same reason.
+being a parameter for the same reason.
+
+The second version fed that regression a level-stepped pink-noise burst,
+because a slope needs its input to vary and pink noise is stationary. It
+worked, and it sounded like a stuttering *krrr krrr* immediately before a calm
+breathing exercise — the wrong first impression for this of all products.
+
+**Music is not stationary.** It varies far more than any burst, so the track is
+now its own excitation: the first three seconds of playback are the
+measurement, and nothing is ever played at you to take it.
 
 The fit's r² is reported, and below 0.5 the coefficients are **discarded rather
-than trusted** — the floor stays static and the screen says why. In the
-headless case that is exactly what happens: r² ≈ 0.04, `NOT TRUSTED`, and
-detection carries on unaffected.
+than trusted** — the floor stays static and the screen says why. A track with
+too little dynamic range is one of the two reasons that happens, and the app
+keeps watching up to nine seconds before giving up.
+
+### Four outcomes, not two
+
+Collapsing these was a mistake made twice, and the second time it broke the
+very configuration the exercise is for.
+
+| verdict | means | and so |
+|---|---|---|
+| `none` | the slope implies a leak far below the room floor | **the headphone case, and the good one.** r² is meaningless — there is no relationship to fit — and waiting cannot change it |
+| `measured` | a real leak, fitted well | subtract it |
+| `unmeasurable` | the track is a drone; the level never moved | nothing to regress against, ever |
+| `untrusted` | real slope, poor fit | something uncorrelated is interfering — the one case where more frames might help |
+
+Treating `none` as a failed measurement made headphones-out-phone-mic-in wait
+the full nine-second extension for a fit that could never succeed, and then
+apologise for it. It now arms in about five seconds and says *no measurable
+leak* as the success it is.
+
+The window also extends while there are **too few usable frames**, which is a
+separate reason waiting helps: every frame with a breath in it is discarded, so
+someone breathing steadily can leave only a handful behind. Eight frames is
+enough to compute a slope and nowhere near enough to trust one.
+
+### The one way this can still be fooled
+
+A breath is normally uncorrelated with the music and lands in the intercept.
+But **in a guided breathing exercise people breathe in time with the track**,
+and a breath rising and falling *with* the level biases the slope upward —
+which would over-subtract and disarm the detector, while the fit still looks
+excellent. That is what makes it dangerous.
+
+So frames where a breath looks to be in progress are excluded from the fit, and
+there is a test asserting that correlated interference *does* bias the estimate,
+so the exclusion is never quietly removed as redundant.
 
 ## Thresholds are relative, always
 
@@ -273,6 +314,8 @@ thresholds remain provisional until a real iPhone moves them.
   close to the −2.5 dB theoretical noise ceiling, which validates that
   derivation independently.
 - A 2.5 s synthetic exhale is detected as **one** breath of **2535 ms**.
+- With a track playing and no acoustic path, the leak verdict is `none`, the
+  detector arms in ~5 s, and nothing is reported as a fault.
 - With a track playing, all three calibration phases run in order and detection
   still works. In the headless case the leak fit correctly reports r² ≈ 0.04 and
   refuses to subtract — see above.
