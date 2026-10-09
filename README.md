@@ -1,0 +1,211 @@
+# musie-breath
+
+A feasibility spike. One question:
+
+> **Can a phone microphone tell, on its own, that you are breathing out
+> through your mouth — well enough to drive something on screen in real time?**
+
+Nothing here is a product. No design system, no i18n, no CI. If detection
+works, the question of what it should look like gets asked elsewhere.
+
+## Why there is reason to doubt it
+
+The [`musie`](https://github.com/product-ben/musie) repo has an open question
+nobody has answered. `echoCancellation` and `noiseSuppression` are switched on
+in its production capture path and **were never measured**. On iOS they select
+voice-processing mode, which changes the input route.
+
+Noise suppression is tuned to classify non-speech as noise and discard it. A
+breath is not speech. So the plausible failure mode is that **iOS deletes the
+signal before we ever see it** — which is why all three processing constraints
+are off by default here, and exposed as toggles that show what iOS actually
+applied rather than what was asked for.
+
+## Running it
+
+```sh
+pnpm install
+pnpm dev          # :5180, strictPort
+```
+
+`pnpm check` is `tsc --noEmit && vitest run`.
+
+### On a phone, which is the only test that counts
+
+`getUserMedia` needs a secure context, and **a LAN address is not one** — iOS
+Safari simply refuses the microphone at `http://192.168.x.x:5180`, which reads
+as a broken app rather than as a missing certificate. So:
+
+```sh
+pnpm dev
+cloudflared tunnel --url http://localhost:5180
+```
+
+Open the `trycloudflare.com` URL on the phone. The dev server allows that
+domain and its subdomains; nothing else.
+
+Port 5180 is pinned with `strictPort` on purpose: musie's dev server owns 5173,
+and a Vite that quietly moves to 5174 means a tunnel that verifies the wrong
+application.
+
+## What to look at, in order
+
+1. **Does `getSettings()` show `noiseSuppression: false` honoured?** The
+   constraints section says `got true` / `got false` per constraint and flags a
+   constraint iOS ignored. This is the headline measurement.
+2. **What does an exhale do to the four features** — with suppression off, and
+   then with it on. Watch the history strip rather than the numbers: during a
+   breath the phone is under your chin and you can read nothing.
+3. **Tune** `onset dB over floor`, `min low ratio` and `max flatness dB`
+   against the strip, at a natural holding distance. Tuning persists across
+   reloads and `Copy diagnostics` puts the whole state on the clipboard.
+4. **Try to fool it.** Speak at it, cough at it, hold a long `ssss`. Each must
+   leave the breath count unchanged.
+5. **Switch apps mid-exhale.** It must report that *it* stopped hearing, never
+   that you stopped breathing.
+
+## How it works
+
+```
+src/detect/     pure, tested, no audio objects and no React
+  config.ts     every dial, each marked DERIVED or GUESS with its reasoning
+  features.ts   one analyser frame -> four numbers
+  decide.ts     the state machine. Everything that can be wrong is in here
+  calibrate.ts  1.5 s of room -> a floor every threshold is relative to
+  status.ts     two verdicts that are never allowed to answer each other's
+src/audio/
+  openMicrophone.ts   the ONLY effectful file
+```
+
+### The four features, and what each one rejects
+
+A mouth exhale is broadband turbulent noise with no harmonic structure and a
+slow envelope, and at phone distance it carries strong sub-300 Hz content from
+air hitting the diaphragm directly.
+
+| feature | rejects |
+|---|---|
+| `excessDb` — RMS over the calibrated floor | a quiet room. Alone it cannot tell breath from anything loud, which is why the other three exist |
+| `lowRatio` — share of new energy below 300 Hz | sound from across the room. This is the "blown at the phone" evidence |
+| `flatnessDb` — **detrended** spectral flatness, 300–3000 Hz | **voiced speech**, which is tonal. See below for why the detrending is not optional |
+| `highRatio` — share of new energy above 4 kHz | **sibilants**. `/s/` is also noise-like, but lives where breath does not |
+
+### Why flatness is detrended, which is the one thing here worth reading
+
+Spectral flatness as a geometric-over-arithmetic mean ratio conflates two
+unrelated things: **tonality** (harmonic peaks, which is what separates a voice
+from noise) and **spectral tilt** (the overall slope, which says nothing about
+tonality). Over a band of N octaves, a perfectly smooth spectrum with R dB of
+tilt costs roughly R/3 dB of flatness all by itself.
+
+That confound is fatal here, because **breath is inherently tilted** — it is the
+entire premise of the `lowRatio` feature. Driven through a fake capture device,
+the plain measure produced an ordering that is simply wrong:
+
+| signal | plain flatness | detrended |
+|---|---|---|
+| realistic breath (gentle tilt) | −3.6 dB | **−2.5 dB** |
+| steeply tilted noise (no tonality at all) | −12.8 dB | **−2.7 dB** |
+| voiced speech | −10.5 dB | **−6.7 dB** |
+
+Plain flatness ranks a smooth tilted noise as *more tonal than a human voice*.
+No single threshold on it can work. After least-squares removing the slope in
+dB and measuring the residual, both noises converge on ≈ −2.5 dB — the
+theoretical ceiling, since for exponentially distributed bin power
+`E[ln X] = ln(mean) − γ` gives `exp(−γ) ≈ 0.56` — while speech stays 4 dB
+below. The feature finally measures what it was chosen to measure.
+
+Plain flatness is still carried in `extras.plainFlatnessDb`, because the gap
+between the two *is* the spectral tilt, which is itself a measurement of how
+close the phone is to the mouth.
+
+Shape features are computed on **excess energy over the floor**, not on total
+energy, so the ratios describe only what is new in the room. That is what makes
+a steady fan survivable.
+
+### Thresholds are relative, always
+
+Absolute thresholds cannot work: the same exhale differs by an order of
+magnitude between a bedroom and a train. So 1.5 s of the room is measured first
+and every threshold is expressed over that floor. The statistic is a **median**,
+because a door closing during calibration would drag a mean up permanently and
+silently disarm the detector for the rest of the session.
+
+That same 1.5 s window doubles as the proof that the audio graph is rendering
+at all — a live microphone always has at least an LSB of noise, so a window in
+which every sample is exactly `0.0` means capture never started, which is a
+completely different fact from a quiet room.
+
+### Two verdicts that never merge
+
+The lesson `musie` paid a day to learn: **one predicate reporting two different
+facts is the defect.** A microphone that opened and produced nothing was
+indistinguishable from a quiet room, so the app told people they had gone
+silent.
+
+So there are two status chips and they may never be combined. The left one may
+say nothing about breathing; the right one may say nothing about the
+microphone. And `no breath detected yet` is **not an error** — it is this
+spike's primary finding, and it is styled as one.
+
+## What has already been measured
+
+Not on a phone — through Chromium's fake capture device
+(`--use-file-for-fake-audio-capture`) with synthesised signals, driving the real
+app end to end. So these validate the **pipeline and the feature set**, and the
+thresholds remain provisional until a real iPhone moves them.
+
+- The chain works: permission, graph, 1.5 s calibration, floor, detection loop.
+- Measured room floor **−82.3 dBFS**, IQR 1.2 dB, floor flatness **−3.5 dB** —
+  close to the −2.5 dB theoretical noise ceiling, which validates that
+  derivation independently.
+- A 2.5 s synthetic exhale is detected as **one** breath of **2535 ms**.
+- Synthesised voiced speech at a comparable level is **rejected**, by `lowRatio`
+  *and* by detrended flatness.
+- A steeply tilted smooth noise is **detected**, which the plain flatness
+  measure got wrong — see above.
+
+Two things theory got wrong, both recorded in `src/detect/config.ts`:
+
+1. **Voiced speech reads −6.8 dB detrended flatness, not the −20 to −35 dB
+   predicted.** At 23 Hz bins a 120 Hz F0 puts harmonics ~5 bins apart and the
+   Blackman main lobe spans roughly ±3, so adjacent harmonics smear together
+   and fill the nulls the prediction assumed. A larger `fftSize` would deepen
+   them, at the cost of a longer window.
+2. **The margins are thinner than they look.** `minLowRatio` separates breath
+   from speech by 0.02, and `maxFlatnessDb` by about 0.3 dB. Each is affordable
+   only because the other also rejects speech — a false positive must pass
+   both gates.
+
+## Inherited iOS findings
+
+Measured in `musie`, not rediscovered here, and load-bearing:
+
+- **A capturing document is exempt from WebKit's Web Audio autoplay gate**, so
+  the `AudioContext` is constructed *after* the `getUserMedia` await. Moving
+  that line earlier breaks iOS in a way no test here would catch.
+- **`context.state` immediately after construction is `suspended` on every
+  engine**, because rendering starts asynchronously. Reading it there proves
+  nothing, so `resume()` is belt-and-braces and never throws.
+- **A node only runs while connected to `destination`**, hence the zero-gain
+  hop. The cost: capture is coupled to whatever iOS is doing with audio output.
+- **`getUserMedia` can resolve with a track already `ended`**, and calls that
+  success.
+- iPhone 13 Pro and later tick `requestAnimationFrame` at **120 Hz**, so every
+  smoothing coefficient derives from `dt` rather than from a frame count.
+
+## Known limits, stated rather than discovered
+
+- **It will trigger on whispering.** A whisper is acoustically a breath with a
+  vocal tract on it.
+- **It needs the phone near your mouth.** The low-frequency component only
+  appears within ~15 cm. If it turns out to be absent at a natural holding
+  distance, `minLowRatio` has to come out of the decision and the detector
+  loses its only proximity evidence.
+- **It cannot work backgrounded.** Features are sampled on
+  `requestAnimationFrame`, which iOS stops when the page is hidden. For a
+  biofeedback visual that is arguably correct — if you cannot see it there is
+  nothing to drive — and a hidden page is reported as `paused`, not as a fault.
+- **Coughs are the weak spot.** The 350 ms minimum duration rejects taps with
+  certainty and most coughs; the flatness gate catches the rest only when the
+  cough is voiced.
