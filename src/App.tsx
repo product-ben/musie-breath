@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
+import { LEAK_WARN_DB, MIN_CONFIDENCE } from './detect/coupling';
 import type { DetectorConfig } from './detect/config';
 import { isRecoverable } from './detect/status';
 import { BreathVisual } from './ui/BreathVisual';
@@ -25,8 +26,10 @@ const SLIDERS: readonly {
 
 export function App() {
   const {
-    status, live, floor, diagnostics, config, setConfig,
+    status, live, floor, coupling, diagnostics, config, setConfig,
     processing, setProcessing, begin, reopen, started,
+    volume, setVolume, lagMs, setLagMs,
+    trackState, loadFile, useGeneratedPad, toggleTrack,
   } = useBreathDetector();
 
   const [tuning, setTuning] = useState(false);
@@ -111,6 +114,84 @@ export function App() {
       {started && (
         <>
           <div className="breath-section">
+            <h2>The track</h2>
+            <p className="breath-note">
+              Played through the microphone's own audio context, so there is one
+              iOS audio session rather than two competing over routing. The
+              spectrum is tapped after the volume, which is what makes the
+              measured leak independent of how loud you set it.
+            </p>
+            <div className="breath-buttons">
+              <label className="breath-button">
+                Choose a file
+                <input
+                  type="file"
+                  accept="audio/*"
+                  style={{ display: 'none' }}
+                  onChange={(e) => {
+                    const file = e.target.files?.[0];
+                    if (file !== undefined) loadFile(file);
+                  }}
+                />
+              </label>
+              <button type="button" className="breath-button" onClick={useGeneratedPad}>
+                Generated pad
+              </button>
+              <button
+                type="button"
+                className="breath-button"
+                disabled={trackState.source === 'none'}
+                onClick={() => void toggleTrack()}
+              >
+                {trackState.playing ? 'Pause' : 'Play'}
+              </button>
+            </div>
+            <p className="breath-note" style={{ marginTop: 10 }}>
+              {trackState.source === 'none'
+                ? 'Nothing loaded — the leak measurement is skipped entirely.'
+                : trackState.name}
+            </p>
+            <label className="breath-slider">
+              <span>volume</span>
+              <input
+                type="range" min={0} max={1} step={0.01} value={volume}
+                onChange={(e) => setVolume(Number(e.target.value))}
+              />
+              <output>{volume.toFixed(2)}</output>
+            </label>
+            {/* The measurement this whole section exists for. */}
+            <pre className="breath-pre" style={{ marginTop: 10 }}>
+{`speaker leak  ${coupling === null ? '— not measured' : Number.isFinite(coupling.leakDb) ? `${coupling.leakDb.toFixed(1)} dB over the room floor` : 'none detected'}
+coupling      ${coupling === null ? '—' : coupling.band.map((v) => v.toExponential(1)).join('  ')}
+fit           ${coupling === null ? '—' : `r² ${coupling.confidence.toFixed(3)}${coupling.confidence < MIN_CONFIDENCE ? '  NOT TRUSTED' : ''}`}
+frames used   ${coupling?.framesUsed ?? '—'}`}
+            </pre>
+            {coupling !== null && coupling.confidence < MIN_CONFIDENCE && (
+              <p className="breath-warn">
+                The leak measurement did not fit (r² {coupling.confidence.toFixed(2)}),
+                so something the speaker was not causing happened during the
+                burst. These coefficients are being ignored rather than trusted —
+                the floor stays static. Keep still and quiet and recalibrate.
+              </p>
+            )}
+            {coupling !== null && coupling.confidence >= MIN_CONFIDENCE && Number.isFinite(coupling.leakDb) && coupling.leakDb >= LEAK_WARN_DB && (
+              <p className="breath-warn">
+                The track is reaching the microphone {coupling.leakDb.toFixed(0)} dB above the
+                room. Subtraction is being asked to remove more than a breath is
+                worth, so a missed or a phantom breath is likely. Headphones, or
+                less volume.
+              </p>
+            )}
+            {coupling !== null && coupling.confidence >= MIN_CONFIDENCE && !Number.isFinite(coupling.leakDb) && (
+              <p className="breath-note">
+                No measurable leak — headphones, or a speaker the microphone
+                cannot hear. This is the easy case: the floor stays static and
+                the detector behaves exactly as it does in silence.
+              </p>
+            )}
+          </div>
+
+          <div className="breath-section">
             <h2>getUserMedia constraints</h2>
             <p className="breath-note">
               All three off by default. Each is tuned for speech; noise suppression
@@ -152,6 +233,15 @@ floor         ${floor === null ? '—' : `${floor.rmsDb.toFixed(1)} dBFS  iqr ${
 floor flatness${floor === null ? ' —' : ` ${floor.flatnessDb.toFixed(1)} dB`}
 frames used   ${floor?.framesUsed ?? '—'}`}
             </pre>
+            {diagnostics !== null && diagnostics.sampleRate < 32000 && (
+              <p className="breath-warn">
+                The capture sample rate is {diagnostics.sampleRate} Hz. That is
+                narrowband — almost certainly a Bluetooth headset mic over HFP —
+                so there is no 4–8 kHz band at all and the sibilant rejector is
+                dead. A long /s/ will read as a breath. Wired, or the phone's
+                own microphone.
+              </p>
+            )}
             <div className="breath-buttons">
               <button type="button" className="breath-button" onClick={reopen}>
                 Recalibrate
@@ -173,6 +263,14 @@ frames used   ${floor?.framesUsed ?? '—'}`}
             </button>
             {tuning && (
               <div className="breath-sliders">
+                <label className="breath-slider">
+                  <span>leak lag ms</span>
+                  <input
+                    type="range" min={0} max={120} step={1} value={lagMs}
+                    onChange={(e) => setLagMs(Number(e.target.value))}
+                  />
+                  <output>{lagMs}</output>
+                </label>
                 {SLIDERS.map((s) => (
                   <label key={s.key} className="breath-slider">
                     <span>{s.label}</span>
@@ -213,6 +311,7 @@ const FAILURE_TEXT: Record<string, string> = {
   noFrames: 'The page stopped being drawn, so nothing could be measured.',
   roomTooLoud: 'This room is too loud for a relative threshold to have any headroom.',
   roomUnstable: 'The level in this room swings too much to measure a floor. Wait and try again.',
+  trackDrowningMic: 'The track is louder at the microphone than a breath can be. Turn it down, or use headphones.',
   trackMuted: 'iOS took the microphone away mid-session.',
   trackEnded: 'The microphone track ended mid-session.',
   contextInterrupted: 'The audio session was interrupted — a call, or Siri.',

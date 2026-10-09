@@ -141,6 +141,18 @@ export const CALIBRATION_MEASURE_MS = 1200;
 export const SILENT_GRAPH_MS = 1500;
 
 /**
+ * How long the pink-noise burst runs to measure speaker-to-microphone
+ * coupling.
+ *
+ * DERIVED, loosely: ~60 frames at 60 Hz, which is enough for a median to be
+ * robust against one transient, and short enough that a burst of noise in the
+ * middle of a calm screen is a moment rather than an event. Shorter than the
+ * room window because pink noise is stationary by construction, so there is
+ * less variance to average away.
+ */
+export const LEAK_MEASURE_MS = 1000;
+
+/**
  * GUESS, from sound arithmetic. A close exhale with AGC off peaks somewhere
  * around -10 dBFS. Detection needs the floor plus ONSET_EXCESS_DB plus ~10 dB
  * of margin to fit underneath that, so the floor has to sit below about

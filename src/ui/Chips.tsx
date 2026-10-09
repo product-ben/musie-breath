@@ -20,6 +20,7 @@ function captureText(status: CaptureStatus): string {
     case 'opening': return 'opening microphone…';
     case 'reopening': return 'reopening…';
     case 'calibrating': return `listening to the room ${status.framesDone}/${status.framesNeeded}`;
+    case 'measuringLeak': return `measuring speaker leak ${status.framesDone}/${status.framesNeeded}`;
     case 'listening': return 'capture live';
     case 'failed': return status.code;
   }

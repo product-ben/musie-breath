@@ -194,3 +194,20 @@ body {
 @media (prefers-reduced-motion: reduce) {
   * { animation: none !important; transition: none !important; }
 }
+
+.breath-warn {
+  margin: 10px 0 0;
+  padding: 10px;
+  border: 1px solid color-mix(in oklab, var(--warn) 50%, var(--line));
+  border-radius: 8px;
+  background: color-mix(in oklab, var(--warn) 9%, var(--panel));
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+/* The file input is hidden inside its label, so the label is the target. */
+label.breath-button {
+  display: inline-flex;
+  align-items: center;
+  cursor: pointer;
+}

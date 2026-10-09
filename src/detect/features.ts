@@ -294,19 +294,30 @@ export function extractFeatures(args: {
   shapeValidExcessDb: number;
   /** rmsDb from ~80 ms ago, for the readout-only attack figure. */
   previousRmsDb?: number;
+  /**
+   * The floor to use for THIS frame instead of the calibrated one.
+   *
+   * Supplied while a track is playing: it is the room floor plus whatever the
+   * track's own spectrum predicts is leaking back into the microphone, so a
+   * frame containing nothing but the track comes out at zero excess. See
+   * detect/coupling.ts.
+   */
+  floorOverride?: { band: readonly [number, number, number]; rmsDb: number };
 }): FeatureFrame {
   const { timeDomain, binsDb, floor, bins, at, dt, shapeValidExcessDb } = args;
+  const floorBand = args.floorOverride?.band ?? floor.bandPower;
+  const floorRmsDb = args.floorOverride?.rmsDb ?? floor.rmsDb;
 
   const rmsDb = rmsToDb(rmsOf(timeDomain));
-  const excessDb = rmsDb - floor.rmsDb;
+  const excessDb = rmsDb - floorRmsDb;
 
   let shape: Shape | null = null;
   if (excessDb >= shapeValidExcessDb) {
     const now = bandPowers(binsDb, bins);
     const excess: [number, number, number] = [
-      Math.max(0, now[0] - floor.bandPower[0]),
-      Math.max(0, now[1] - floor.bandPower[1]),
-      Math.max(0, now[2] - floor.bandPower[2]),
+      Math.max(0, now[0] - floorBand[0]),
+      Math.max(0, now[1] - floorBand[1]),
+      Math.max(0, now[2] - floorBand[2]),
     ];
     const total = excess[0] + excess[1] + excess[2];
     if (total > 0) {

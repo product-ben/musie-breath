@@ -123,7 +123,69 @@ Shape features are computed on **excess energy over the floor**, not on total
 energy, so the ratios describe only what is new in the room. That is what makes
 a steady fan survivable.
 
-### Thresholds are relative, always
+### Playing a track while listening
+
+The point of the exercise: you listen to something while it watches for your
+out-breath. That is the hard version, because **music looks a great deal like
+breath to these four features** — a full mix is broadband, bass-weighted (so it
+passes `lowRatio`) and noise-like in aggregate (so it passes detrended
+flatness). Through the phone's own speaker it arrives at the phone's own
+microphone a few centimetres away and the detector fires on the track.
+
+`echoCancellation` is the obvious fix and the one thing that cannot be used,
+because switching it on puts iOS into voice-processing mode — the exact
+variable this spike exists to measure.
+
+So instead: **the playback signal is ours, so we can subtract what it
+predicts.** Calibration has three phases:
+
+1. **The room**, in silence. Also the proof the audio graph renders at all.
+2. **The speaker leak** — a one-second pink-noise burst. Pink rather than white
+   because the estimate wants roughly equal energy per octave; white noise puts
+   its power where a phone speaker is weakest.
+3. **Listening**, with the floor now `room + coupling × live track spectrum`,
+   delayed by the output latency because the microphone hears the past.
+
+The playback analyser is tapped **after** the volume gain, which makes the
+coupling coefficients volume-independent: turn the track down and the measured
+spectrum moves while the transfer function stays valid. With headphones the
+coupling measures ≈0 and everything degrades to the static-floor case that
+already works.
+
+### The leak is measured as a slope, not a ratio
+
+This is the second defect testing found, and it mattered more than the first.
+
+The initial version computed `c = (heard − room) / played` per frame and took
+the median. Driven in a headless browser — where there is **no acoustic path
+whatsoever**, since the fake microphone reads a file — it confidently reported
+**32 dB of speaker leak**, because the burst happened to overlap a loud passage
+in that file. The estimator had no way to tell *the speaker caused this* from
+*something else happened at the same time*.
+
+On a phone that is the failure mode, not a curiosity: anyone who breathes,
+speaks or shuts a door during the burst inflates the coefficient, and the
+detector then over-subtracts for the rest of the session and silently disarms
+itself. A median survives one transient; it does not survive a sustained one.
+
+So the burst **steps its level** and coupling is the least-squares slope of
+heard against played:
+
+```
+heard_b = intercept_b + c_b · played_b
+```
+
+Anything the speaker did not cause is constant across the burst, lands in
+`intercept_b`, and leaves the slope alone. It measures what the speaker
+*causes* rather than what merely *coincides* with it. The room floor stops
+being a parameter at all, for the same reason.
+
+The fit's r² is reported, and below 0.5 the coefficients are **discarded rather
+than trusted** — the floor stays static and the screen says why. In the
+headless case that is exactly what happens: r² ≈ 0.04, `NOT TRUSTED`, and
+detection carries on unaffected.
+
+## Thresholds are relative, always
 
 Absolute thresholds cannot work: the same exhale differs by an order of
 magnitude between a bedroom and a train. So 1.5 s of the room is measured first
@@ -160,6 +222,9 @@ thresholds remain provisional until a real iPhone moves them.
   close to the −2.5 dB theoretical noise ceiling, which validates that
   derivation independently.
 - A 2.5 s synthetic exhale is detected as **one** breath of **2535 ms**.
+- With a track playing, all three calibration phases run in order and detection
+  still works. In the headless case the leak fit correctly reports r² ≈ 0.04 and
+  refuses to subtract — see above.
 - Synthesised voiced speech at a comparable level is **rejected**, by `lowRatio`
   *and* by detrended flatness.
 - A steeply tilted smooth noise is **detected**, which the plain flatness
@@ -209,3 +274,11 @@ Measured in `musie`, not rediscovered here, and load-bearing:
 - **Coughs are the weak spot.** The 350 ms minimum duration rejects taps with
   certainty and most coughs; the flatness gate catches the rest only when the
   cough is voiced.
+- **Speaker playback is unproven.** The subtraction is verified by unit test
+  and the measurement refuses to lie when it cannot fit, but **no real acoustic
+  leak has ever been through it** — a headless browser cannot produce one. The
+  first phone session is where speaker mode is either viable or is not.
+- **A Bluetooth headset mic breaks the sibilant rejector.** iOS routes capture
+  to HFP, which is narrowband, so there is no 4–8 kHz band and a long `/s/`
+  will read as a breath. The app warns when the capture rate drops below
+  32 kHz.

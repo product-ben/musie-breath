@@ -55,6 +55,13 @@ export const DEFAULT_PROCESSING: Processing = {
 
 export type Microphone = {
   readonly analyser: AnalyserNode;
+  /**
+   * Shared on purpose. Playback goes through THIS context, not one of its own:
+   * on iOS a second AudioContext means a second audio session competing with
+   * the first over routing and output device, and the renegotiation that
+   * causes is musie's documented prime suspect for a silent capture.
+   */
+  readonly context: AudioContext;
   readonly sampleRate: number;
   readonly stop: () => void;
   /**
@@ -259,6 +266,7 @@ export async function openMicrophone(options: {
 
   return {
     analyser,
+    context,
     sampleRate: context.sampleRate,
     stop: release,
     diagnostics: () => ({

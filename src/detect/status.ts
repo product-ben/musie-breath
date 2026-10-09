@@ -29,6 +29,12 @@ export type CaptureFailure =
   /* ── audio arrived, and it is unusable ───────────────────────────────── */
   | 'roomTooLoud'
   | 'roomUnstable'
+  /**
+   * The track is louder at the microphone than anything a person can do, so
+   * subtraction has nothing to work with. A DIFFERENT FACT from a loud room:
+   * the remedy is headphones or less volume, not a quieter building.
+   */
+  | 'trackDrowningMic'
   /* ── was working, then stopped ───────────────────────────────────────── */
   | 'trackMuted'
   | 'trackEnded'
@@ -40,6 +46,8 @@ export type CaptureStatus =
   | { readonly kind: 'opening' }
   | { readonly kind: 'reopening' }
   | { readonly kind: 'calibrating'; readonly framesDone: number; readonly framesNeeded: number }
+  /** The pink-noise burst that measures speaker-to-microphone coupling. */
+  | { readonly kind: 'measuringLeak'; readonly framesDone: number; readonly framesNeeded: number }
   | { readonly kind: 'listening' }
   | { readonly kind: 'failed'; readonly code: CaptureFailure; readonly detail?: string };
 
@@ -50,6 +58,10 @@ export function isRecoverable(code: CaptureFailure): boolean {
     case 'noDevice':
     case 'insecureContext':
       return false;
+    case 'trackDrowningMic':
+      /* Recoverable by turning the volume down or putting headphones in,
+         which is a thing the person can actually do. */
+      return true;
     default:
       return true;
   }
