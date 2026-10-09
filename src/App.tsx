@@ -27,6 +27,7 @@ const SLIDERS: readonly {
 export function App() {
   const {
     status, live, floor, coupling, diagnostics, config, setConfig,
+    devices, wantedDeviceId, setWantedDeviceId, route,
     processing, setProcessing, begin, reopen, started,
     volume, setVolume, lagMs, setLagMs,
     trackState, loadFile, useGeneratedPad, toggleTrack,
@@ -113,6 +114,90 @@ export function App() {
 
       {started && (
         <>
+          <div className="breath-section">
+            <h2>Which microphone</h2>
+            <p className="breath-note">
+              Listening on headphones while capturing on the phone itself is the
+              combination worth having: nothing leaks into the capture and the
+              built-in microphone keeps its full bandwidth. iOS does not offer
+              it by default — headphones normally take the capture route too,
+              and over Bluetooth that means narrowband. This asks for the
+              built-in one and reports what it was actually given.
+            </p>
+
+            {devices.length === 0 ? (
+              <p className="breath-note">
+                No inputs enumerated yet. Labels only appear once the microphone
+                has been granted, so this fills in after the first start.
+              </p>
+            ) : (
+              <div className="breath-sliders">
+                {devices.map((d) => (
+                  <label key={d.deviceId} className="breath-toggle">
+                    <input
+                      type="radio"
+                      name="mic"
+                      checked={wantedDeviceId === d.deviceId}
+                      onChange={() => setWantedDeviceId(d.deviceId)}
+                    />
+                    <span className="breath-toggle-label">{d.label}</span>
+                    <span className="breath-applied">{d.kind}</span>
+                  </label>
+                ))}
+                <label className="breath-toggle">
+                  <input
+                    type="radio"
+                    name="mic"
+                    checked={wantedDeviceId === null}
+                    onChange={() => setWantedDeviceId(null)}
+                  />
+                  <span className="breath-toggle-label">whatever iOS picks</span>
+                  <span className="breath-applied">default</span>
+                </label>
+              </div>
+            )}
+
+            {/* The measurement. Asked versus got, for the route this time. */}
+            <pre className="breath-pre" style={{ marginTop: 10 }}>
+{`asked for   ${wantedDeviceId === null ? 'no preference' : `${devices.find((d) => d.deviceId === wantedDeviceId)?.label ?? wantedDeviceId}`}
+got         ${diagnostics?.trackLabel === undefined || diagnostics.trackLabel === '' ? '(no label)' : diagnostics.trackLabel}
+capture at  ${diagnostics?.sampleRate ?? '—'} Hz
+route says  ${route === null ? '—' : `${route.likely}${route.narrowband ? ', narrowband' : ', full band'}`}`}
+            </pre>
+
+            {diagnostics?.deviceRefused === true && (
+              <p className="breath-warn">
+                iOS refused the microphone that was asked for and gave this one
+                instead. So the capture route cannot be chosen from a web page
+                on this device — which is itself the answer to the question, and
+                means the only lever left is which headphones you use.
+              </p>
+            )}
+
+            {route !== null && route.narrowband && (
+              <p className="breath-warn">
+                Capturing at {diagnostics?.sampleRate} Hz. That is narrowband,
+                which is near-proof of a Bluetooth headset microphone: there is
+                no 4–8 kHz band, so the sibilant rejector does not exist and a
+                long /s/ will read as a breath. Wired headphones — ideally ones
+                with no microphone of their own — should hand capture back to
+                the phone.
+              </p>
+            )}
+
+            {route !== null && !route.narrowband && coupling !== null
+              && coupling.confidence >= MIN_CONFIDENCE
+              && Number.isFinite(coupling.leakDb) && coupling.leakDb > 6 && (
+              <p className="breath-warn">
+                Full-band capture, but the speaker leak still measures{' '}
+                {coupling.leakDb.toFixed(0)} dB. On headphones that is the
+                signature of a headset microphone sitting inches from its own
+                driver — the track is going into the microphone rather than only
+                into your ears.
+              </p>
+            )}
+          </div>
+
           <div className="breath-section">
             <h2>The track</h2>
             <p className="breath-note">
@@ -233,15 +318,7 @@ floor         ${floor === null ? '—' : `${floor.rmsDb.toFixed(1)} dBFS  iqr ${
 floor flatness${floor === null ? ' —' : ` ${floor.flatnessDb.toFixed(1)} dB`}
 frames used   ${floor?.framesUsed ?? '—'}`}
             </pre>
-            {diagnostics !== null && diagnostics.sampleRate < 32000 && (
-              <p className="breath-warn">
-                The capture sample rate is {diagnostics.sampleRate} Hz. That is
-                narrowband — almost certainly a Bluetooth headset mic over HFP —
-                so there is no 4–8 kHz band at all and the sibilant rejector is
-                dead. A long /s/ will read as a breath. Wired, or the phone's
-                own microphone.
-              </p>
-            )}
+
             <div className="breath-buttons">
               <button type="button" className="breath-button" onClick={reopen}>
                 Recalibrate

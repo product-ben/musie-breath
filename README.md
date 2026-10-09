@@ -123,7 +123,58 @@ Shape features are computed on **excess energy over the floor**, not on total
 energy, so the ratios describe only what is new in the room. That is what makes
 a steady fan survivable.
 
-### Playing a track while listening
+### Headphones out, phone microphone in
+
+The configuration the exercise actually wants: the track goes straight into
+your ears so nothing leaks into the capture, and the built-in microphone keeps
+its full bandwidth.
+
+**iOS does not offer that combination by default.** Connecting headphones
+normally moves the *capture* route to the headset microphone as well, and over
+Bluetooth that means HFP — 8 or 16 kHz, so there is no 4–8 kHz band at all and
+the sibilant rejector does not exist. A long `/s/` then reads as a breath.
+
+Whether a web page can override the route is an open question, and the honest
+answer may be no: iOS Safari has historically ignored `deviceId` for audio
+input and may expose a single input whose physical route the system alone
+picks. So the app asks and then reports:
+
+- Every enumerated input, classified `builtIn` / `headset` / `unknown`.
+  **Labels are empty strings until microphone permission is granted**, so the
+  picker only fills in after the first start — before that, anonymous entries
+  would be worse than none.
+- `deviceId: { exact: … }` is requested, so a refusal throws rather than
+  silently handing over a different microphone. A refusal is then **retried
+  without the constraint and remembered**, so the app still works and the
+  diagnostics still say it was not what was asked for.
+- **Asked for / got / capture rate / route**, in four lines.
+
+### The capture rate is the strongest tell
+
+HFP cannot carry more than 16 kHz, so a rate at or below that identifies a
+Bluetooth headset microphone whatever the labels claim — and it is the exact
+condition under which the high band disappears. `routeFromRate` encodes that,
+and the app warns on it.
+
+### And the leak measurement doubles as a route detector
+
+Once there are headphones, the pink-noise burst answers a second question for
+free:
+
+| capture route | expected leak |
+|---|---|
+| phone's own microphone | ≈ none — the drivers are in your ears, the mic is on the phone |
+| headset microphone | real — the mic sits inches from its own driver |
+
+So **full-band capture with a measurable leak** means the track is going into
+the microphone rather than only into your ears, which is the headset-mic
+signature on wired earbuds. The app says so when it sees it.
+
+If the route cannot be chosen on your device, the only lever left is which
+headphones you use — wired, and ideally without a microphone of their own,
+should hand capture back to the phone.
+
+## Playing a track while listening
 
 The point of the exercise: you listen to something while it watches for your
 out-breath. That is the hard version, because **music looks a great deal like
@@ -282,3 +333,7 @@ Measured in `musie`, not rediscovered here, and load-bearing:
   to HFP, which is narrowband, so there is no 4–8 kHz band and a long `/s/`
   will read as a breath. The app warns when the capture rate drops below
   32 kHz.
+- **Choosing the capture route may be impossible from a web page.** The app
+  asks for the built-in microphone with an `exact` constraint and reports a
+  refusal, but iOS may simply not allow it. That is a finding the first phone
+  session returns, not something this repo can fix.

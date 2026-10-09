@@ -1,6 +1,8 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { DEFAULT_PROCESSING, MicrophoneError, keepAwake, openMicrophone } from './audio/openMicrophone';
 import type { Processing } from './audio/openMicrophone';
+import { listInputs, preferBuiltIn, routeFromRate } from './audio/devices';
+import type { MicDevice } from './audio/devices';
 import { createPlayback } from './audio/playback';
 import type { Playback } from './audio/playback';
 import { calibrate } from './detect/calibrate';
@@ -65,6 +67,8 @@ export function useBreathDetector() {
   const [trackState, setTrackState] = useState({ source: 'none' as 'none' | 'file' | 'pad', playing: false, name: '' });
   const [volume, setVolumeState] = useState(0.6);
   const [lagMs, setLagMs] = useState(25);
+  const [devices, setDevices] = useState<MicDevice[]>([]);
+  const [wantedDeviceId, setWantedDeviceId] = useState<string | null>(null);
 
   const live = useRef<Live>({
     frame: null, detector: initialDetectorState(0), fps: 0, verdict: 'waiting', played: null,
@@ -95,6 +99,7 @@ export function useBreathDetector() {
       try {
         mic = await openMicrophone({
           processing,
+          deviceId: wantedDeviceId,
           isAborted: () => aborted,
           onInterrupted: (code) => { if (!aborted) setStatus({ kind: 'failed', code }); },
         });
@@ -108,6 +113,27 @@ export function useBreathDetector() {
       stopMic = mic.stop;
       releaseWake = await keepAwake();
       setDiagnostics(mic.diagnostics());
+
+      /**
+       * Enumerated HERE and not earlier, because device labels are empty
+       * strings until microphone permission has been granted. Before the first
+       * successful getUserMedia the picker can only offer anonymous entries,
+       * which is worse than offering none.
+       */
+      void listInputs().then((found) => {
+        if (aborted) return;
+        setDevices(found);
+        /* First run with no choice made: aim at the built-in one, which is the
+           whole point when listening on headphones. Only re-opens if iOS
+           actually names a built-in input that is not already what we have. */
+        if (wantedDeviceId === null) {
+          const builtIn = preferBuiltIn(found);
+          const current = mic.diagnostics().applied.deviceId;
+          if (builtIn !== null && builtIn.deviceId !== current) {
+            setWantedDeviceId(builtIn.deviceId);
+          }
+        }
+      });
 
       /* Playback shares the microphone's context — one audio session. */
       playback = createPlayback(mic.context);
@@ -351,7 +377,19 @@ export function useBreathDetector() {
 
     void start();
 
+    /**
+     * Plugging headphones in or out changes the device list AND, on iOS, the
+     * route of an already-open stream. Re-enumerating keeps the picker honest;
+     * the stream itself is left alone, because tearing capture down under
+     * somebody mid-breath is worse than a stale label.
+     */
+    const onDeviceChange = () => {
+      void listInputs().then((found) => { if (!aborted) setDevices(found); });
+    };
+    navigator.mediaDevices?.addEventListener?.('devicechange', onDeviceChange);
+
     return () => {
+      navigator.mediaDevices?.removeEventListener?.('devicechange', onDeviceChange);
       aborted = true;
       cancelAnimationFrame(raf);
       releaseWake();
@@ -366,7 +404,7 @@ export function useBreathDetector() {
        the stream. `config`, `volume` and `lagMs` are read through refs so a
        slider move does not cost a three-second recalibration. */
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [processing, generation]);
+  }, [processing, generation, wantedDeviceId]);
 
   const setVolume = useCallback((v: number) => {
     setVolumeState(v);
@@ -395,8 +433,11 @@ export function useBreathDetector() {
 
   const restart = useCallback(() => setGeneration((g) => g + 1), []);
 
+  const route = diagnostics === null ? null : routeFromRate(diagnostics.sampleRate);
+
   return {
     status, live, floor, coupling, diagnostics,
+    devices, wantedDeviceId, setWantedDeviceId, route,
     config, setConfig, processing, setProcessing,
     volume, setVolume, lagMs, setLagMs,
     trackState, loadFile, useGeneratedPad, toggleTrack,

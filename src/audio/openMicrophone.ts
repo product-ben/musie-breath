@@ -76,6 +76,12 @@ export type Microphone = {
     trackState: MediaStreamTrackState;
     requested: Processing;
     applied: MediaTrackSettings;
+    /** The input asked for, or null if we took whatever iOS offered. */
+    wantedDeviceId: string | null;
+    /** True when iOS refused the request and we fell back. */
+    deviceRefused: boolean;
+    /** The label of the track we ended up with, as the browser reports it. */
+    trackLabel: string;
   };
 };
 
@@ -100,6 +106,12 @@ function failureFor(error: unknown): CaptureFailure {
 export async function openMicrophone(options: {
   processing: Processing;
   /**
+   * The input we would LIKE. Asked for with `exact` so a refusal is visible,
+   * then retried without it so a refusal is not fatal — see the comment at
+   * the call below.
+   */
+  deviceId?: string | null;
+  /**
    * Capture died after it had started — the track was muted or ended under us,
    * or the context was interrupted. Reported rather than thrown: by the time
    * this fires the promise has long resolved and there is nobody left to catch.
@@ -117,13 +129,43 @@ export async function openMicrophone(options: {
     throw new MicrophoneError('insecureContext');
   }
 
+  /**
+   * ── ASK EXACTLY, THEN FALL BACK, AND RECORD WHICH HAPPENED ───────────────
+   * `deviceId: { exact }` makes iOS throw OverconstrainedError rather than
+   * quietly hand over a different microphone, which is the only way to learn
+   * whether the route can be chosen from a web page at all.
+   *
+   * But a hard failure would make the app unusable on every device that does
+   * not allow the choice, so a refusal is retried without the constraint and
+   * remembered. The person still gets a working microphone; the diagnostics
+   * still say it was not the one asked for.
+   */
   let stream: MediaStream;
-  try {
-    stream = await navigator.mediaDevices.getUserMedia({
-      audio: { channelCount: 1, ...processing },
+  let deviceRefused = false;
+  const wanted = options.deviceId ?? null;
+
+  const request = (withDevice: boolean) =>
+    navigator.mediaDevices.getUserMedia({
+      audio: {
+        channelCount: 1,
+        ...processing,
+        ...(withDevice && wanted !== null ? { deviceId: { exact: wanted } } : {}),
+      },
     });
+
+  try {
+    stream = await request(wanted !== null);
   } catch (error) {
-    throw new MicrophoneError(failureFor(error));
+    const name = error instanceof DOMException ? error.name : '';
+    const refusedTheDevice =
+      wanted !== null && (name === 'OverconstrainedError' || name === 'NotFoundError');
+    if (!refusedTheDevice) throw new MicrophoneError(failureFor(error));
+    deviceRefused = true;
+    try {
+      stream = await request(false);
+    } catch (fallbackError) {
+      throw new MicrophoneError(failureFor(fallbackError));
+    }
   }
 
   /**
@@ -276,6 +318,9 @@ export async function openMicrophone(options: {
       trackState: track.readyState,
       requested: processing,
       applied: track.getSettings(),
+      wantedDeviceId: wanted,
+      deviceRefused,
+      trackLabel: track.label,
     }),
   };
 }
