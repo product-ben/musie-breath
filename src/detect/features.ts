@@ -90,6 +90,16 @@ export type FeatureFrame = {
   /** rmsDb minus the floor's. The level gate reads only this. */
   readonly excessDb: number;
   /**
+   * Largest absolute sample in the window, 0..1.
+   *
+   * Not used by the detector — RMS is what the gates read. It is here because
+   * "übersteuert" is a real, measurable thing rather than a synonym for loud:
+   * a peak at 1.0 means the converter ran out of range and the waveform is
+   * being flattened. Blowing hard straight at a phone microphone with auto
+   * gain off does exactly that, which is what the candle's blowout reads.
+   */
+  readonly peak: number;
+  /**
    * null when excessDb is too small for floor subtraction to mean anything.
    *
    * NULL MEANS NO EVIDENCE. It must never be read as evidence of absence —
@@ -119,6 +129,16 @@ export function rmsOf(timeDomain: Float32Array): number {
   let sum = 0;
   for (let i = 0; i < timeDomain.length; i += 1) sum += timeDomain[i] * timeDomain[i];
   return Math.sqrt(sum / timeDomain.length);
+}
+
+/** Largest absolute sample. Clipping shows up here and nowhere else. */
+export function peakOf(timeDomain: Float32Array): number {
+  let peak = 0;
+  for (let i = 0; i < timeDomain.length; i += 1) {
+    const v = timeDomain[i] < 0 ? -timeDomain[i] : timeDomain[i];
+    if (v > peak) peak = v;
+  }
+  return peak;
 }
 
 export function rmsToDb(rms: number): number {
@@ -310,6 +330,7 @@ export function extractFeatures(args: {
 
   const rmsDb = rmsToDb(rmsOf(timeDomain));
   const excessDb = rmsDb - floorRmsDb;
+  const peak = peakOf(timeDomain);
 
   let shape: Shape | null = null;
   if (excessDb >= shapeValidExcessDb) {
@@ -334,6 +355,7 @@ export function extractFeatures(args: {
     dt,
     rmsDb,
     excessDb,
+    peak,
     shape,
     extras: {
       centroidHz: centroidOf(binsDb, bins),

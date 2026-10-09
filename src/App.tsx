@@ -2,7 +2,8 @@ import { useEffect, useRef, useState } from 'react';
 import { LEAK_WARN_DB, MIN_CONFIDENCE } from './detect/coupling';
 import type { DetectorConfig } from './detect/config';
 import { isRecoverable } from './detect/status';
-import { BreathVisual } from './ui/BreathVisual';
+import { CandleGL } from './ui/CandleGL';
+import type { CandleState } from './ui/candle';
 import { Chips } from './ui/Chips';
 import { Instrument } from './ui/Instrument';
 import { useBreathDetector } from './useBreathDetector';
@@ -33,6 +34,7 @@ export function App() {
     trackState, loadFile, useGeneratedPad, toggleTrack,
   } = useBreathDetector();
 
+  const [candle, setCandle] = useState<CandleState | null>(null);
   const [tuning, setTuning] = useState(false);
   const [copied, setCopied] = useState(false);
   const loaded = useRef(false);
@@ -84,7 +86,7 @@ export function App() {
   return (
     <div className="breath-root">
       <div className="breath-stage">
-        <BreathVisual live={live} />
+        <CandleGL live={live} onCandle={setCandle} />
         {!started && (
           <div className="breath-gate">
             <h1>Breathe out at your phone</h1>
@@ -100,6 +102,16 @@ export function App() {
       </div>
 
       <Chips status={status} verdict={verdict} breaths={breaths} />
+
+      {started && candle !== null && (
+        <p className="breath-readout">
+          flame {candle.phase}
+          {'  ·  '}life {candle.life.toFixed(2)}
+          {'  ·  '}lean {candle.lean.toFixed(2)}
+          {'  ·  '}blown out {candle.blowouts}
+          {'  ·  '}peak {(live.current?.frame?.peak ?? 0).toFixed(3)}
+        </p>
+      )}
 
       {status.kind === 'failed' && (
         <p className="breath-failure">

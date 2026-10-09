@@ -30,6 +30,7 @@ function frame(at: number, dt: number, excessDb: number, shape: Shape | null): F
     dt,
     rmsDb: -60 + excessDb,
     excessDb,
+    peak: Math.min(1, 0.02 * Math.pow(10, excessDb / 40)),
     shape,
     extras: { centroidHz: 800, attackDb: 0, plainFlatnessDb: -8 },
   };

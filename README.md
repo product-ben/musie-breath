@@ -75,6 +75,10 @@ src/detect/     pure, tested, no audio objects and no React
   status.ts     two verdicts that are never allowed to answer each other's
 src/audio/
   openMicrophone.ts   the ONLY effectful file
+src/ui/
+  candle.ts           PURE: the flame's life. lit -> out -> relighting
+  candleShader.ts     the whole scene, as one fragment shader
+  CandleGL.tsx        owns the GL context and the loop, and no logic
 ```
 
 ### The four features, and what each one rejects
@@ -173,6 +177,65 @@ signature on wired earbuds. The app says so when it sees it.
 If the route cannot be chosen on your device, the only lever left is which
 headphones you use — wired, and ideally without a microphone of their own,
 should hand capture back to the phone.
+
+## The candle
+
+The visualisation is a WebGL candle. Breathe at it and the flame leans and
+churns; **overdrive it and the flame goes out**, leaving smoke and a dark
+candle until it catches again.
+
+Everything — wax, wick, flame, glow, smoke — is signed-distance work in one
+fragment shader over a full-screen quad. No geometry, no textures, no
+dependency, one draw call, GLSL ES 1.00 so WebGL1 is enough.
+
+### "Übersteuert" is measured, not guessed
+
+Going out is tied to the input genuinely clipping, not merely being loud. A new
+`peak` feature carries the largest absolute sample in the window: at 1.0 the
+converter has run out of range and the waveform is being flattened, which is
+exactly what blowing hard straight at a phone microphone with auto gain off
+does. The blowout triggers on `peak >= 0.985`, or on intensity alone above
+0.88 as a fallback.
+
+It must also **hold for 70 ms**. One clipped sample is a tap on the case, not a
+breath, and a flame that dies at random is not feedback — it is noise.
+
+### The flame's life is a pure state machine
+
+`src/ui/candle.ts` is `lit → out → relighting`, with no WebGL, no canvas and no
+clock: `dtMs` is a parameter, so a test drives a whole blowout-and-relight in
+microseconds. The renderer only uploads what it returns, so the flame can never
+disagree with the decision that drove it. It will not relight into a wind that
+is still blowing, and it can be blown out again mid-catch.
+
+The direction the flame leans **wanders slowly and is not measured**. Nothing
+in a microphone says which way air was moving, so only the magnitude is real;
+inventing a direction from the level would be a lie told in pixels.
+
+### Three things the screenshots caught
+
+Tuning a visual by breathing at it is slow and unrepeatable — you cannot hold
+intensity at 0.6 with your lungs — so `window.__forceBreath = { intensity, peak }`
+drives the flame directly and the shader was tuned against screenshots at known
+inputs.
+
+1. **`loseContext()` on teardown poisons the canvas.** It looks like good
+   hygiene. But `getContext` returns the *same* context object every time, so a
+   context deliberately lost on unmount is handed straight back to the next
+   mount, already dead — and every shader then "fails" to compile with a *null*
+   info log while the source is perfectly fine. React 19 StrictMode
+   double-mounts on the same DOM node, so this fired on the very first render
+   and the candle never appeared once.
+2. **A flame has to be clipped to read as a light source.** Multiplying the
+   colour by something near 1.0 tone-mapped to a flat yellow shape that looked
+   painted on. The core is now pushed to ~18× before the Reinhard curve so it
+   lands on white-hot. The wax is lit by the flame too, which is what makes the
+   blowout darken the whole candle rather than only the place the flame was.
+3. **The flame is anchored at its base.** Displacing it evenly turned it into a
+   sideways-sliding ribbon at mid intensity; real flames only whip in the upper
+   half, so sway and lean scale as `t²`. And it is about three times as tall as
+   it is wide — taller than that and it stops reading as a flame however good
+   the motion is.
 
 ## Playing a track while listening
 
